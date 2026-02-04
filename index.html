@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Dragon's Nest (Dungeon Mode)</title>
+    <style>
+        /* External font removed to prevent security blocking */
+        :root {
+            --bg-color: #050505;
+            --ui-bg: #2a2a2a;
+            --ui-border: #5a5a5a;
+            --text-color: #cccccc;
+            --accent-color: #ffcc00; /* Yellow for highlights */
+        }
+
+            background: var(--bg-color); 
+            font-family: 'Courier New', 'Gulim', monospace; 
+            image-rendering: pixelated; 
+            user-select: none;
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: -1; /* Canvas is ALWAYS at the back */
+        }
+
+        /* Buttons & Panels directly on top */
+        .retro-panel, #toolbar, #msg-log {
+            z-index: 9999; /* UI is ALWAYS at the front */
+            pointer-events: auto !important; /* Force clickable */
+        }
+
+        /* Dark Vignette Overlay for Dungeon Atmosphere */
+        #vignette {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            background: radial-gradient(circle, transparent 40%, rgba(0,0,0,0.8) 90%);
+            z-index: 50;
+        }
+
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; padding: 20px; box-sizing: border-box;
+            z-index: 100; /* UI above visuals */
+        }
+
+        .retro-panel {
+            background: var(--ui-bg);
+            border: 3px outset var(--ui-border); /* Classic Bevel */
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
+            padding: 10px 15px;
+            color: var(--text-color);
+            pointer-events: auto;
+            image-rendering: pixelated;
+        }
+
+        .header {
+            position: absolute; top: 20px; left: 20px;
+            display: flex; gap: 15px; align-items: center;
+        }
+
+        h1 { margin: 0; font-size: 24px; color: #d4d4d4; text-shadow: 2px 2px #000; letter-spacing: 1px; }
+        .stat { font-size: 18px; color: #aaa; }
+        
+        #toolbar {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #333;
+        }
+
+        .retro-btn {
+            background: #444;
+            border: 3px outset #666; /* 3D Clicky feel */
+            color: #ddd;
+            padding: 10px 20px;
+            font-family: 'DungGeunMo', monospace;
+            font-size: 16px;
+            cursor: pointer;
+            text-shadow: 1px 1px #000;
+        }
+        .retro-btn:hover { background: #555; border-color: #777; color: #fff; }
+        .retro-btn:active { 
+            border: 3px inset #444; /* Pressed Effect */
+            transform: translate(1px, 1px);
+        }
+        .retro-btn.active { 
+            background: #552200; 
+            border-color: #ffaa00; 
+            color: #ffaa00; 
+            border-style: inset;
+        }
+
+        .tooltip {
+            position: absolute; background: #111; border: 1px solid #777; color: #eee;
+            padding: 6px; font-size: 14px; pointer-events: none;
+            display: none; z-index: 100;
+            box-shadow: 2px 2px 0 #000;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+</head>
+<body>
+    <!-- Panels pulled out of wrapper to avoid blocking -->
+    <div class="retro-panel header">
+        <h1>DRAGON'S NEST</h1>
+        <span class="stat">GOLD: <span id="gold" style="color:#ffd700">500</span></span>
+        <span class="stat">WAVE: <span id="wave">1</span></span>
+    </div>
+
+    <div id="toolbar">
+        <button class="retro-btn" onclick="game.setTool('trap', this)">TRAP [50]</button>
+        <button class="retro-btn" onclick="game.setTool('tower', this)">TOWER [100]</button>
+        <button class="retro-btn" onclick="game.setTool('mine', this)">MINE [150]</button>
+        <button class="retro-btn" onclick="game.setTool(null, this)" style="color:#ff5555">CANCEL</button>
+        <button class="retro-btn" onclick="game.startWave()" style="margin-left:20px; background:#005500;">START</button>
+    </div>
+    
+    <div id="tooltip" class="tooltip"></div>
+    <!-- New On-Screen Message Log -->
+    <div id="msg-log" style="position:absolute; bottom:80px; width:100%; text-align:center; color:#ffff00; font-size:16px; font-weight:bold; pointer-events:none; text-shadow:1px 1px 0 #000;">
+        SYSTEM: READY
+    </div>
+
+    <script>
+        // --- Pixel Asset Generator ---
+        // Dynamically creates pixel art textures so we don't need external files
+        const AssetGen = {
+            createTexture: (drawFn) => {
+                const size = 64;
+                const canvas = document.createElement('canvas');
+                canvas.width = size; canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                ctx.imageSmoothingEnabled = false;
+                drawFn(ctx, size);
+                const tex = new THREE.CanvasTexture(canvas);
+                tex.magFilter = THREE.NearestFilter; // Nearest Neighbor scale
+                tex.minFilter = THREE.NearestFilter;
+                return tex;
+            },
+
+            drawFloor: (ctx, s) => {
+                // 1. Base Dark Stone Color
+                ctx.fillStyle = '#2a2a2e'; 
+                ctx.fillRect(0,0,s,s);
+                
+                // 2. Generate Noise (Gritty Texture)
+                for(let i=0; i<40; i++) {
+                    const x = Math.floor(Math.random() * s);
+                    const y = Math.floor(Math.random() * s);
+                    const size = Math.random() * 2 + 1;
+                    // Random slight variations in grey
+                    ctx.fillStyle = Math.random() > 0.5 ? '#353539' : '#1f1f22';
+                    ctx.fillRect(x, y, size, size);
+                }
+
+                // 3. Tile Border (Bevel Effect)
+                ctx.lineWidth = 1;
+                // Highlight (Top/Left)
+                ctx.strokeStyle = '#444'; 
+                ctx.beginPath(); ctx.moveTo(0,s); ctx.lineTo(0,0); ctx.lineTo(s,0); ctx.stroke();
+                // Shadow (Bottom/Right)
+                ctx.strokeStyle = '#111';
+                ctx.beginPath(); ctx.moveTo(s,0); ctx.lineTo(s,s); ctx.lineTo(0,s); ctx.stroke();
+
+                // 4. Subtle Inner Grid (Optional, makes it look tiled)
+                ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.strokeRect(0,0,s,s);
+            },
+
+            drawSlime: (ctx, s) => {
+                ctx.fillStyle = '#ff3333';
+                // Pixel Blob
+                ctx.fillRect(16, 16, 32, 32);
+                ctx.fillRect(12, 24, 40, 16);
+                ctx.fillRect(20, 8, 24, 8);
+                // Eyes
+                ctx.fillStyle = 'white'; ctx.fillRect(20, 20, 8, 8); ctx.fillRect(36, 20, 8, 8);
+                ctx.fillStyle = 'black'; ctx.fillRect(24, 22, 4, 4); ctx.fillRect(40, 22, 4, 4);
+            },
+
+            drawTower: (ctx, s) => {
+                ctx.fillStyle = '#555555'; ctx.fillRect(16, 32, 32, 32); // Base
+                ctx.fillStyle = '#3333aa'; ctx.fillRect(12, 12, 40, 20); // Top
+                ctx.fillStyle = '#6666ff'; ctx.fillRect(24, 4, 16, 16); // Gem
+                // Windows
+                ctx.fillStyle = 'black'; ctx.fillRect(28, 40, 8, 12);
+            },
+
+            drawTrap: (ctx, s) => {
+                ctx.fillStyle = '#222222'; ctx.fillRect(8, 48, 48, 12); // Plate
+                ctx.fillStyle = '#aaaaaa'; 
+                // Spikes
+                ctx.beginPath();
+                ctx.moveTo(16, 48); ctx.lineTo(20, 20); ctx.lineTo(24, 48);
+                ctx.moveTo(32, 48); ctx.lineTo(36, 10); ctx.lineTo(40, 48);
+                ctx.moveTo(48, 48); ctx.lineTo(52, 25); ctx.lineTo(56, 48);
+                ctx.fill();
+            },
+
+            drawMine: (ctx, s) => {
+                ctx.fillStyle = '#443322'; ctx.fillRect(10, 40, 44, 20);
+                // Gold
+                ctx.fillStyle = '#ffaa00';
+                ctx.beginPath(); ctx.arc(32, 30, 15, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#ffff00'; ctx.fillRect(28, 26, 8, 8); // Shine
+            },
+
+            drawCore: (ctx, s) => {
+                ctx.fillStyle = '#ff0055';
+                // Heart shape pixels approximation
+                ctx.fillRect(16, 16, 12, 20); ctx.fillRect(36, 16, 12, 20);
+                ctx.fillRect(12, 24, 40, 20);
+                ctx.fillRect(20, 44, 24, 10);
+                ctx.fillRect(28, 54, 8, 6);
+            },
+
+            drawEntrance: (ctx, s) => {
+                 ctx.fillStyle = '#4488ff';
+                 // Portal Swirl
+                 ctx.beginPath(); ctx.arc(32, 32, 20, 0, Math.PI*2); ctx.fill();
+                 ctx.strokeStyle = '#ffffff'; ctx.lineWidth=4; ctx.stroke();
+            }
+        };
+
+        class Game {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x000000); // Pitch Black Background
+
+                // Orthographic Camera for 2D Isometric look
+                const aspect = window.innerWidth / window.innerHeight;
+                const d = 10;
+                this.camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 1, 1000);
+                
+                // Typical Isometric Angle
+                this.camera.position.set(20, 20, 20);
+                this.camera.lookAt(0,0,0);
+
+                this.renderer = new THREE.WebGLRenderer({ antialias: false }); 
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.shadowMap.enabled = true; // Enable Shadows
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                document.body.appendChild(this.renderer.domElement);
+
+                // --- Lighting Upgrade ---
+                const ambient = new THREE.AmbientLight(0x404040, 0.6); // Darker ambient for contrast
+                this.scene.add(ambient);
+
+                // Core Light (Warm/Fire)
+                const coreLight = new THREE.PointLight(0xffaa00, 1.5, 15);
+                coreLight.position.set(9 - this.gridSize/2, 4, 5 - this.gridSize/2);
+                coreLight.castShadow = true;
+                this.scene.add(coreLight);
+
+                // Entrance Light (Cool/Magic)
+                const entLight = new THREE.PointLight(0x0088ff, 1.5, 15);
+                entLight.position.set(0 - this.gridSize/2, 4, 5 - this.gridSize/2);
+                entLight.castShadow = true;
+                this.scene.add(entLight);
+
+                this.raycaster = new THREE.Raycaster();
+                this.mouse = new THREE.Vector2();
+
+                // Assets
+                this.textures = {
+                    floor: AssetGen.createTexture(AssetGen.drawFloor),
+                    trap: AssetGen.createTexture(AssetGen.drawTrap),
+                    tower: AssetGen.createTexture(AssetGen.drawTower),
+                    mine: AssetGen.createTexture(AssetGen.drawMine),
+                    core: AssetGen.createTexture(AssetGen.drawCore),
+                    entrance: AssetGen.createTexture(AssetGen.drawEntrance),
+                    slime: AssetGen.createTexture(AssetGen.drawSlime)
+                };
+
+                // Game State
+                this.gridSize = 10;
+                this.map = [];
+                this.enemies = [];
+                this.projectiles = [];
+                this.gold = 500;
+                this.wave = 1;
+
+                this.initMap();
+                this.setupEvents();
+                this.log("GRAPHICS ENGINE: HIGH QUALITY");
+                this.loop();
+            }
+
+            initMap() {
+                const group = new THREE.Group();
+                const offset = (this.gridSize) / 2 - 0.5;
+
+                // Create Tile Grid & Walls
+                for(let y=0; y<this.gridSize; y++){
+                    const row = [];
+                    for(let x=0; x<this.gridSize; x++){
+                        // Floor: Use Box for thickness
+                        const geo = new THREE.BoxGeometry(1, 0.2, 1); 
+                        const mat = new THREE.MeshStandardMaterial({ 
+                            map: this.textures.floor,
+                            roughness: 0.8,
+                            metalness: 0.2
+                        });
+                        
+                        const tile = new THREE.Mesh(geo, mat);
+                        tile.position.set(x - offset, -0.1, y - offset); // Sunk slightly
+                        tile.receiveShadow = true; // Floors receive shadows
+                        tile.userData = { x, y, type: 'floor' };
+                        
+                        group.add(tile);
+                        row.push({ tile, x, y, content: null });
+
+                        // Walls on Edge
+                        if(x===0 || x===this.gridSize-1 || y===0 || y===this.gridSize-1) {
+                            if(!(x===0 && y===5) && !(x===9 && y===5)) { // Don't block entrance/exit
+                                const wallGeo = new THREE.BoxGeometry(1, 2, 1);
+                                const wallMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 1 });
+                                const wall = new THREE.Mesh(wallGeo, wallMat);
+                                wall.position.set(x - offset, 1, y - offset);
+                                wall.castShadow = true;
+                                wall.receiveShadow = true;
+                                this.scene.add(wall);
+                            }
+                        }
+                    }
+                    this.map.push(row);
+                }
+                this.scene.add(group);
+                this.tileGroup = group;
+
+                // --- CURSOR (The Yellow Selection Box) ---
+                const cursorGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1));
+                const cursorMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+                this.cursor = new THREE.LineSegments(cursorGeo, cursorMat);
+                this.cursor.rotation.x = -Math.PI / 2;
+                this.cursor.position.set(0, 0.05, 0); // Slightly above floor
+                this.cursor.visible = false;
+                this.scene.add(this.cursor);
+
+                // --- DEBUG CUBE (Spinning Green Box) ---
+                // If this stops spinning, the renderer is dead.
+                const debugGeo = new THREE.BoxGeometry(1, 1, 1);
+                const debugMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+                this.debugCube = new THREE.Mesh(debugGeo, debugMat);
+                this.debugCube.position.set(0, 3, 0); // Float high above
+                this.scene.add(this.debugCube);
+
+                this.build(0, 5, 'entrance');
+                this.build(9, 5, 'core');
+                this.entrance = {x:0, y:5};
+                this.core = {x:9, y:5};
+            }
+
+            // Create a "Billboard" Sprite
+            createSprite(tex, scale=1.0) {
+                const mat = new THREE.SpriteMaterial({ map: tex });
+                const sprite = new THREE.Sprite(mat);
+                sprite.scale.set(scale, scale, 1);
+                sprite.center.set(0.5, 0); // Pivot at bottom
+                return sprite;
+            }
+
+            build(x, y, type) {
+                const cell = this.map[y][x];
+                if(cell.content) {
+                    this.scene.remove(cell.content);
+                    cell.content = null;
+                }
+
+                let sprite = null;
+                if(type === 'entrance') sprite = this.createSprite(this.textures.entrance, 1.2);
+                else if(type === 'core') sprite = this.createSprite(this.textures.core, 1.2);
+                else if(type === 'tower') sprite = this.createSprite(this.textures.tower, 1.2);
+                else if(type === 'trap') sprite = this.createSprite(this.textures.trap, 1.0);
+                else if(type === 'mine') sprite = this.createSprite(this.textures.mine, 1.0);
+
+                if(sprite) {
+                    sprite.position.copy(cell.tile.position);
+                    sprite.position.y += 0.1; // Slight lift
+                    
+                    // Simple pop-in
+                    const s = sprite.scale.y;
+                    sprite.scale.y = 0;
+                    let p = 0;
+                    const anim = setInterval(() => {
+                        p += 0.1; sprite.scale.y = s * p;
+                        if(p>=1) clearInterval(anim);
+                    }, 16);
+
+                    this.scene.add(sprite);
+                    cell.content = sprite;
+                    cell.type = type;
+                }
+            }
+
+            setTool(t, btn) {
+                this.tool = t;
+                document.querySelectorAll('.retro-btn').forEach(b => b.classList.remove('active'));
+                if(btn) btn.classList.add('active');
+                
+                if(t) this.log("SELECTED: " + t.toUpperCase());
+                else this.log("CANCELLED");
+            }
+
+            interact(x, y) {
+                if(!this.tool) {
+                    this.log("Select a tool first!");
+                    return;
+                }
+                const cell = this.map[y][x];
+                
+                if(cell.type === 'core' || cell.type === 'entrance') {
+                    this.log("Can't build there!");
+                    return;
+                }
+
+                const cost = { trap:50, tower:100, mine:150 }[this.tool];
+                if(this.gold >= cost) {
+                    this.gold -= cost;
+                    this.updateUI();
+                    this.build(x, y, this.tool);
+                    this.log("CONSTRUCTED: " + this.tool.toUpperCase());
+                } else {
+                    this.log("NOT ENOUGH GOLD!");
+                }
+            }
+
+            spawnEnemy() {
+                const start = this.map[this.entrance.y][this.entrance.x];
+                
+                const sprite = this.createSprite(this.textures.slime, 0.8);
+                sprite.position.copy(start.tile.position);
+                sprite.position.y += 0.2;
+                this.scene.add(sprite);
+
+                this.enemies.push({
+                    sprite,
+                    hp: 50,
+                    target: this.map[this.core.y][this.core.x].tile.position
+                });
+            }
+
+            startWave() {
+                this.log("WAVE STARTED! ENEMIES INCOMING!");
+                let c = 0;
+                const i = setInterval(() => {
+                    this.spawnEnemy();
+                    c++;
+                    if(c>=5) clearInterval(i);
+                }, 1000);
+            }
+
+            setupEvents() {
+                window.addEventListener('resize', () => {
+                   const aspect = window.innerWidth/window.innerHeight;
+                   this.camera.left = -10*aspect; this.camera.right = 10*aspect;
+                   this.camera.updateProjectionMatrix();
+                   this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+
+                document.addEventListener('mousedown', e => {
+                    this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                    this.raycaster.setFromCamera(this.mouse, this.camera);
+                    
+                    const intersects = this.raycaster.intersectObjects(this.tileGroup.children);
+                    if(intersects.length > 0) {
+                        const d = intersects[0].object.userData;
+                        this.interact(d.x, d.y);
+                    }
+                });
+
+                // Mouse Move for Cursor & Debug
+                document.addEventListener('mousemove', e => {
+                    this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                    
+                    // Input Debug Log
+                    const el = document.getElementById('msg-log');
+                    if(el) el.innerText = `MOUSE: ${e.clientX}, ${e.clientY}`;
+
+                    this.raycaster.setFromCamera(this.mouse, this.camera);
+                    
+                    const intersects = this.raycaster.intersectObjects(this.tileGroup.children);
+                    if(intersects.length > 0) {
+                        const tile = intersects[0].object;
+                        this.cursor.position.x = tile.position.x;
+                        this.cursor.position.z = tile.position.z;
+                        this.cursor.visible = true;
+                    } else {
+                        // this.cursor.visible = false; 
+                    }
+                });
+            }
+            
+            updateUI() {
+                document.getElementById('gold').innerText = this.gold;
+            }
+
+            loop() {
+                const t = Date.now() * 0.005;
+
+                // Rotate Debug Cube
+                if(this.debugCube) {
+                    this.debugCube.rotation.x += 0.02;
+                    this.debugCube.rotation.y += 0.01;
+                }
+
+                // Heartbeat Log
+                if(this.frame === undefined) this.frame = 0;
+                this.frame++;
+                if(this.frame % 60 === 0) {
+                    const el = document.getElementById('msg-log');
+                    if(el && el.innerText.includes("SYSTEM")) {
+                        el.innerText = "SYSTEM: RUNNING " + (this.frame % 120 === 0 ? "●" : "○");
+                    }
+                }
+
+                // Enemy Logic
+                for(let i=this.enemies.length-1; i>=0; i--) {
+                        const e = this.enemies[i];
+                        if(e.dead) continue;
+
+                        const dir = new THREE.Vector3().subVectors(e.target, e.sprite.position).normalize();
+                        dir.y = 0;
+                        e.sprite.position.addScaledVector(dir, 0.03);
+                        e.sprite.position.y = 0.2 + Math.abs(Math.sin(t + i))*0.2; // Offset jump
+
+                        // Reach Core
+                        if(e.sprite.position.distanceTo(e.target) < 0.5) {
+                            this.scene.remove(e.sprite);
+                            this.enemies.splice(i, 1);
+                            // Damage Effect could go here
+                        }
+                    }
+
+                    // Towers
+                    const enemiesToRemove = [];
+                    this.map.forEach(row => row.forEach(cell => {
+                        if(cell.type === 'tower' && this.enemies.length > 0) {
+                            // Target first alive enemy
+                            const target = this.enemies.find(e => !e.dead);
+                            if(target && cell.tile.position.distanceTo(target.sprite.position) < 4) {
+                                if(Math.random() < 0.05) {
+                                    // Visual Line
+                                    const points = [
+                                        cell.tile.position.clone().add(new THREE.Vector3(0,0.5,0)),
+                                        target.sprite.position.clone().add(new THREE.Vector3(0,0.2,0))
+                                    ];
+                                    const geo = new THREE.BufferGeometry().setFromPoints(points);
+                                    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color:0xffff00}));
+                                    this.scene.add(line);
+                                    setTimeout(()=>this.scene.remove(line), 50);
+                                    
+                                    target.hp -= 20;
+                                    if(target.hp <= 0 && !target.dead) {
+                                        target.dead = true; // Mark for removal
+                                        // Delay removal slightly to prevent loop flicker or handle in next frame
+                                        this.scene.remove(target.sprite);
+                                        enemiesToRemove.push(target);
+                                        
+                                        this.gold += 30; 
+                                        this.updateUI();
+                                    }
+                                }
+                            }
+                        }
+                    }));
+                    
+                    // Clean up dead enemies
+                    if(enemiesToRemove.length > 0) {
+                        this.enemies = this.enemies.filter(e => !e.dead);
+                    }
+
+                    this.renderer.render(this.scene, this.camera);
+                    requestAnimationFrame(() => this.loop());
+            }
+        }
+        
+        // Start Game Directly
+        window.game = new Game();
+    </script>
+</body>
+</html>
